@@ -124,7 +124,7 @@ fn read_player_input(
     let direction = right * stick.x + forward * stick.y;
 
     for mut intent in &mut players {
-        *intent = MoveIntent { direction, sprint, jump, crouch, prone };
+        *intent = MoveIntent { direction, sprint, jump, crouch, prone, ..default() };
     }
 }
 
@@ -159,7 +159,7 @@ fn update_hud(
 ) {
     let (Ok(loco), Ok(mut text)) = (player.single(), hud.single_mut()) else { return };
     let name = match loco.state {
-        LocomotionState::Vault(_) => "Vault".to_string(),
+        LocomotionState::Traversal(_) => "Traversal".to_string(),
         other => format!("{other:?}"),
     };
     text.0 = format!(
