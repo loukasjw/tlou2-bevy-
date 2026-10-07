@@ -41,15 +41,10 @@ src/
   camera.rs       camera
   locomotion/     state machine, sensors, sprint, traversal, tuning values
   weapon/         damage tables, melee, tuning values
-reverse_engineering/
-  VALUES.md       every number found so far, tagged confirmed / guess
-  data/           decoded weapon damage table
-  notes/          findings and working notes
-  tools/          optional data-format helpers
 ```
 
-Values in the code are either confirmed from game data or marked as placeholders to be measured in-game. See `reverse_engineering/README.md` for how each is tagged.
+Tuning values live in each module's `tuning.rs`. Some are confirmed from game data and the rest are placeholders to be measured in-game.
 
 ## Legal
 
-*The Last of Us* is a trademark of Sony Interactive Entertainment LLC. This repository contains only original code and numeric findings. Raw game data and decompiled code are deliberately excluded, so do not commit them.
+*The Last of Us* is a trademark of Sony Interactive Entertainment LLC. This repository contains only original code. Raw game data and decompiled code are deliberately excluded and must not be committed.

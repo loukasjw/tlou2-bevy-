@@ -2,3 +2,9 @@
 
 # Decompiled game code: copyrighted, keep it local.
 /functions/
+
+# Local research notes and extracted data: not part of the project.
+/reverse_engineering/
+
+# Local editor/tool settings.
+/.claude/
