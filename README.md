@@ -4,11 +4,11 @@ A [Bevy](https://bevy.org) (Rust) reimplementation of *The Last of Us Part II*'s
 
 > Unofficial fan project. Not affiliated with or endorsed by Naughty Dog or Sony Interactive Entertainment. Contains no original game code, models, audio or textures.
 
-## Status
+## Features
 
-- **Locomotion**: state machine (walk, sprint, crouch, prone, jump, vault/traversal), sensors and a motion model.
-- **Weapons**: damage tables and melee logic modules, in progress.
-- **Camera**: follow camera, in progress.
+- **Locomotion**: state machine (walk, sprint with stamina, crouch, prone, dive, dodge, jump, vault/climb traversal, landings), sensors and a motion model.
+- **Camera**: third-person orbit camera with aim and scope.
+- **Weapons**: hunting rifle, pistol (with silencer), melee, ammo and reload, damage by weapon and target type.
 
 ## Run
 
@@ -22,16 +22,26 @@ The first build compiles Bevy and takes a while. Dependencies are optimized even
 
 ## Controls
 
-| Action | Keyboard | Gamepad |
+| Action | Keyboard / mouse | Gamepad |
 |---|---|---|
 | Move | WASD | Left stick |
+| Look | Mouse (click to lock, Esc to release) | Right stick |
 | Walk (half speed) | Left Alt | Partial stick |
-| Sprint | Left Shift | Left stick click |
-| Jump / vault | Space | South (A / Cross) |
-| Crouch | C | East (B / Circle) |
-| Prone | Z | North (Y / Triangle) |
+| Sprint | Left Shift | Left bumper |
+| Jump / vault / climb | Space | South (A / Cross) |
+| Crouch (tap) / prone (hold) | C | East (B / Circle) |
+| Prone | Z | |
+| Dodge | Q | Right bumper |
+| Aim | Right mouse | Left trigger |
+| Fire / melee (unaimed) | Left mouse | Right trigger |
+| Reload | R | |
+| Melee | F | West (X / Square) |
+| Silencer | V | D-pad down |
+| Weapon | 1 unarmed, 2 rifle, 3 pistol, 4 melee | D-pad up / left / right |
+| Hold breath (scoped) | Shift | |
+| Toggle sprint mode / infinite ammo | F1 / F2 | |
 
-The test area has a low wall you can vault, a wall too tall to vault, and a crate too deep to vault.
+The test area has a low wall you can vault, a wall too tall to vault, a crate too deep to vault, and targets to shoot.
 
 ## Layout
 
