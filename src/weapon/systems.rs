@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use super::damage::{DamageTable, Target, TargetKind};
 use super::tuning::{stance_sway_scale, HoldBreath, WeaponTable};
 use super::{AmmoSettings, Arsenal, Breath, Loadout, Noise, Silencer, WeaponInput};
-use crate::camera::{ray_box, OrbitCamera};
+use crate::camera::{ray_box, ray_capsule, OrbitCamera};
 use crate::locomotion::components::KinematicBody;
 use crate::locomotion::sensors::Obstacle;
 use crate::locomotion::state::{Locomotion, LocomotionState};
@@ -212,7 +212,8 @@ pub fn update_weapons(
             if target.health <= 0.0 {
                 continue;
             }
-            if let Some(d) = box_hit(t.translation, target.half_extents).filter(|&d| d < nearest.0) {
+            let pill = ray_capsule(origin, dir, t.translation, target.half_extents.x, target.half_extents.y);
+            if let Some(d) = pill.filter(|&d| d < nearest.0) {
                 nearest = (d, Some(e));
             }
         }

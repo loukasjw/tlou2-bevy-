@@ -218,9 +218,59 @@ pub fn ray_box(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
     (enter >= 0.0 && exit >= enter).then_some(enter)
 }
 
+/// Distance along the ray to a vertical capsule (a "pill") of `radius` whose
+/// centre is `center` and whose total height is `2 * half_height`.
+/// Like `ray_box`, rays starting inside the shape don't hit.
+pub fn ray_capsule(origin: Vec3, dir: Vec3, center: Vec3, radius: f32, half_height: f32) -> Option<f32> {
+    let seg = (half_height - radius).max(0.0);
+    let (bottom, top) = (center - Vec3::Y * seg, center + Vec3::Y * seg);
+    let mut best: Option<f32> = None;
+    let mut consider = |t: f32| {
+        if t >= 0.0 && best.is_none_or(|b| t < b) {
+            best = Some(t);
+        }
+    };
+    let ray_sphere = |c: Vec3| {
+        let oc = origin - c;
+        let b = oc.dot(dir);
+        let disc = b * b - (oc.length_squared() - radius * radius);
+        (disc >= 0.0).then(|| -b - disc.sqrt())
+    };
+    // Caps count only on their outer hemisphere.
+    if let Some(t) = ray_sphere(top).filter(|&t| (origin + dir * t).y >= top.y) {
+        consider(t);
+    }
+    if let Some(t) = ray_sphere(bottom).filter(|&t| (origin + dir * t).y <= bottom.y) {
+        consider(t);
+    }
+    // Side of the cylinder, between the two cap centres.
+    let (o, d) = (Vec2::new(origin.x - center.x, origin.z - center.z), Vec2::new(dir.x, dir.z));
+    let a = d.length_squared();
+    if a > 1e-8 {
+        let b = o.dot(d);
+        let disc = b * b - a * (o.length_squared() - radius * radius);
+        if disc >= 0.0 {
+            let t = (-b - disc.sqrt()) / a;
+            if (bottom.y..=top.y).contains(&(origin + dir * t).y) {
+                consider(t);
+            }
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ray_capsule_hits_body_and_misses_box_corner() {
+        let c = Vec3::new(0.0, 0.9, 0.0);
+        let hit = ray_capsule(Vec3::new(0.0, 0.9, 5.0), Vec3::NEG_Z, c, 0.3, 0.9);
+        assert!((hit.unwrap() - 4.7).abs() < 1e-4);
+        // Corner of the old bounding box: inside the box, outside the pill.
+        assert_eq!(ray_capsule(Vec3::new(0.29, 1.78, 5.0), Vec3::NEG_Z, c, 0.3, 0.9), None);
+    }
 
     fn ctx(weapon: WeaponId, stance: Stance, aiming: bool) -> CameraContext {
         CameraContext { weapon, stance, aiming }

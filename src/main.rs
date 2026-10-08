@@ -22,7 +22,7 @@ use weapon::{AmmoSettings, Arsenal, Loadout, Silencer, WeaponId, WeaponInput, We
 #[derive(Component)]
 struct Player;
 
-/// Visual capsule, a child of the player so it can squash per stance.
+/// Visual humanoid, a child of the player so it can squash per stance.
 #[derive(Component)]
 struct PlayerBody;
 
@@ -161,15 +161,48 @@ fn setup(
     }
 
     let tuning = LocomotionTuning::default();
-    let body_height = tuning.standing_height - 2.0 * tuning.radius;
+    let gray = materials.add(Color::srgb(0.55, 0.57, 0.62));
+    let red = materials.add(Color::srgb(0.65, 0.15, 0.15));
+    // Mannequin built only from capsules, sized for a 1.8 m stand. PlayerBody
+    // sits at mid-height so parts are placed relative to the centre (feet at
+    // -0.9). Each entry is (radius, total pill height, material, offset).
+    let pills = [
+        // Legs: thigh and shin on each side
+        (0.07, 0.40, &gray, Vec3::new(-0.10, -0.30, 0.0)),
+        (0.07, 0.40, &gray, Vec3::new(0.10, -0.30, 0.0)),
+        (0.055, 0.40, &gray, Vec3::new(-0.10, -0.69, 0.0)),
+        (0.055, 0.40, &gray, Vec3::new(0.10, -0.69, 0.0)),
+        // Torso: narrow waist under a bigger chest
+        (0.12, 0.30, &red, Vec3::new(0.0, 0.02, 0.0)),
+        (0.16, 0.50, &red, Vec3::new(0.0, 0.27, 0.0)),
+        // Arms: upper and lower on each side
+        (0.045, 0.32, &gray, Vec3::new(-0.24, 0.40, 0.0)),
+        (0.045, 0.32, &gray, Vec3::new(0.24, 0.40, 0.0)),
+        (0.04, 0.32, &gray, Vec3::new(-0.24, 0.10, 0.0)),
+        (0.04, 0.32, &gray, Vec3::new(0.24, 0.10, 0.0)),
+        // Neck and head
+        (0.04, 0.12, &gray, Vec3::new(0.0, 0.60, 0.0)),
+        (0.09, 0.20, &gray, Vec3::new(0.0, 0.75, 0.0)),
+    ];
     let player = commands
         .spawn((Player, Locomotion::default(), Loadout::default(), tuning.clone(), Visibility::default()))
-        .with_child((
-            PlayerBody,
-            Mesh3d(meshes.add(Capsule3d::new(tuning.radius, body_height))),
-            MeshMaterial3d(materials.add(Color::srgb(0.8, 0.45, 0.2))),
-            Transform::from_xyz(0.0, tuning.standing_height * 0.5, 0.0),
-        ))
+        .with_children(|player| {
+            player
+                .spawn((
+                    PlayerBody,
+                    Transform::from_xyz(0.0, tuning.standing_height * 0.5, 0.0),
+                    Visibility::default(),
+                ))
+                .with_children(|body| {
+                    for (radius, height, material, offset) in pills {
+                        body.spawn((
+                            Mesh3d(meshes.add(Capsule3d::new(radius, height - 2.0 * radius))),
+                            MeshMaterial3d(material.clone()),
+                            Transform::from_translation(offset),
+                        ));
+                    }
+                });
+        })
         .id();
 
     let stick_material = materials.add(Color::srgb(0.35, 0.22, 0.12));
