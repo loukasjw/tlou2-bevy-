@@ -13,6 +13,7 @@ pub mod traversal;
 pub mod tuning;
 
 use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LocomotionSet {
@@ -29,14 +30,16 @@ pub struct LocomotionPlugin;
 impl Plugin for LocomotionPlugin {
     fn build(&self, app: &mut App) {
         use LocomotionSet::*;
-        app.configure_sets(Update, (Input, Sense, Transition, Movement, Integrate).chain())
+        app.add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
+            .configure_sets(Update, (Input, Sense, Transition, Movement, Integrate).chain())
             .add_systems(
                 Update,
                 (
-                    sensors::sense_environment.in_set(Sense),
+                    (sensors::init_controllers, sensors::add_obstacle_colliders).before(Sense),
+                    (sensors::absorb_blocked_motion, sensors::sense_environment).chain().in_set(Sense),
                     (sprint::update_stamina, systems::update_state).chain().in_set(Transition),
                     systems::apply_movement.in_set(Movement),
-                    (systems::integrate, sensors::resolve_collisions).chain().in_set(Integrate),
+                    systems::integrate.in_set(Integrate),
                 ),
             );
     }

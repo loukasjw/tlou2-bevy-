@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy_rapier3d::prelude::{Collider, KinematicCharacterController};
 
 use super::components::{
     EnvironmentSensors, GroundSensor, KinematicBody, LocomotionMemory, MoveIntent,
@@ -153,7 +154,7 @@ pub fn apply_movement(
                 apply_gravity(&mut body, ground.grounded, t, dt);
             }
             LocomotionState::ChangingStance { .. } => {
-                drive(&mut body, Vec3::ZERO, None, t, dt);
+                drive(&mut body, Vec3::ZERO, Some(t.stance_decel_stiffness), t, dt);
                 apply_gravity(&mut body, ground.grounded, t, dt);
             }
             LocomotionState::Dive | LocomotionState::Evade { .. } => {
@@ -192,11 +193,38 @@ pub fn apply_movement(
 
 pub fn integrate(
     time: Res<Time>,
-    mut query: Query<(&Locomotion, &MoveIntent, &KinematicBody, &LocomotionTuning, &mut Transform)>,
+    mut query: Query<(
+        &Locomotion,
+        &MoveIntent,
+        &KinematicBody,
+        &GroundSensor,
+        &LocomotionTuning,
+        &mut Transform,
+        &mut KinematicCharacterController,
+    )>,
 ) {
     let dt = time.delta_secs();
-    for (loco, intent, body, tuning, mut transform) in &mut query {
-        transform.translation += body.velocity * dt;
+    for (loco, intent, body, ground, tuning, mut transform, mut controller) in &mut query {
+        let mut displacement = body.velocity * dt;
+        if matches!(loco.state, LocomotionState::Traversal(_)) {
+            // Scripted curve: bypasses collision.
+            transform.translation += displacement;
+        } else {
+            // Rapier slides/steps the capsule and applies the result to the
+            // transform in PostUpdate.
+            // The capsule starts at step height: ledges below it are walked
+            // onto (feet follow the sensed ground), anything taller is a wall.
+            let span = (tuning.height(loco.state.stance()) - tuning.step_height).max(0.2);
+            let radius = tuning.radius.min(span * 0.5);
+            controller.custom_shape = Some((
+                Collider::capsule_y((span * 0.5 - radius).max(0.0), radius),
+                Vec3::Y * (tuning.step_height + span * 0.5),
+                Quat::IDENTITY,
+            ));
+            // Never sink below the ground; rise onto low ledges.
+            displacement.y = displacement.y.max(ground.height - transform.translation.y);
+            controller.translation = Some(displacement);
+        }
 
         // Strafing faces the aim on the ground; airborne and traversal moves
         // keep facing their motion.

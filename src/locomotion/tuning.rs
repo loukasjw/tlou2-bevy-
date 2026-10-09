@@ -63,6 +63,9 @@ pub struct LocomotionTuning {
     // Stance change durations (s).
     pub stand_crouch_time: f32,
     pub crouch_prone_time: f32,
+    /// Spring stiffness while changing stance: low, so momentum carries through
+    /// a crouch instead of stopping dead.
+    pub stance_decel_stiffness: f32,
     pub stand_prone_time: f32,
 
     // Dive to prone (going prone while sprinting).
@@ -146,11 +149,13 @@ impl Default for LocomotionTuning {
 
             stand_crouch_time: 0.18,
             crouch_prone_time: 0.45,
+            stance_decel_stiffness: 3.0,
             stand_prone_time: 0.65,
 
-            dive_min_speed: 4.5,
-            dive_speed: 5.5,
-            dive_duration: 0.7,
+            // A run (3.8 m/s) is enough to dive; the dive keeps your speed.
+            dive_min_speed: 3.0,
+            dive_speed: 4.6,
+            dive_duration: 0.8,
             dive_friction: 3.0,
 
             evade_speed: 5.0,

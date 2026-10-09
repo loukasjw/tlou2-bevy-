@@ -5,9 +5,9 @@ use bevy::prelude::*;
 use super::damage::{DamageTable, Target, TargetKind};
 use super::tuning::{stance_sway_scale, HoldBreath, WeaponTable};
 use super::{AmmoSettings, Arsenal, Breath, Loadout, Noise, Silencer, WeaponInput};
-use crate::camera::{ray_box, ray_capsule, OrbitCamera};
+use crate::camera::{ray_capsule, OrbitCamera};
 use crate::locomotion::components::KinematicBody;
-use crate::locomotion::sensors::Obstacle;
+use bevy_rapier3d::prelude::*;
 use crate::locomotion::state::{Locomotion, LocomotionState};
 use crate::locomotion::tuning::LocomotionTuning;
 
@@ -112,7 +112,7 @@ pub fn update_weapons(
         Option<&mut Silencer>,
     )>,
     mut cameras: Query<(&mut OrbitCamera, &Transform)>,
-    obstacles: Query<(&Transform, &Obstacle)>,
+    rapier: ReadRapierContext,
     mut targets: Query<(Entity, &Transform, &mut Target, &mut HitFlash)>,
 ) {
     let dt = time.delta_secs();
@@ -201,12 +201,15 @@ pub fn update_weapons(
         let spread = tuning.spread + tuning.moving_spread * moving;
         let dir = spread_direction(cam_transform.forward().as_vec3(), spread, &mut arsenal);
 
-        let box_hit = |center: Vec3, half: Vec3| ray_box(origin, dir, center - half, center + half);
         let mut nearest = (tuning.range, None);
-        for (t, o) in &obstacles {
-            if let Some(d) = box_hit(t.translation, o.half_extents).filter(|&d| d < nearest.0) {
-                nearest = (d, None);
-            }
+        if let Some(d) = rapier
+            .single()
+            .ok()
+            .and_then(|ctx| ctx.cast_ray(origin, dir, tuning.range, true, QueryFilter::default()))
+            .map(|(_, toi)| toi)
+            .filter(|&d| d > 1e-3 && d < nearest.0)
+        {
+            nearest = (d, None);
         }
         for (e, t, target, _) in &targets {
             if target.health <= 0.0 {

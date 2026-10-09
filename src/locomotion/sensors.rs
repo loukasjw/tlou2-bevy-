@@ -1,9 +1,11 @@
-//! Stand-in physics: a flat floor at y = 0 plus axis-aligned boxes that can be
-//! stood on, collided with, or crawled under. Replace with shape casts from a
-//! physics backend (e.g. avian3d); the state machine only depends on the
-//! sensor components, not on this module.
+//! World queries and collision. Rapier owns the static world (every `Obstacle`
+//! gets a cuboid collider) and the kinematic capsule controller that moves
+//! characters; this module turns its ray casts into the sensor components the
+//! state machine reads. Only the edge-traversal probe still works from the
+//! `Obstacle` boxes, because it needs the exact top/exit geometry of a ledge.
 
 use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
 
 use super::components::{EnvironmentSensors, GroundSensor, KinematicBody, MoveIntent};
 use super::state::{Locomotion, LocomotionState};
@@ -11,7 +13,7 @@ use super::traversal::TraversalCandidate;
 use super::tuning::LocomotionTuning;
 
 const FLOOR_Y: f32 = 0.0;
-const GROUND_SKIN: f32 = 0.02;
+const GROUND_SKIN: f32 = 0.06;
 const LANDING_MARGIN: f32 = 0.15;
 const ONTO_MARGIN: f32 = 0.1;
 
@@ -42,8 +44,8 @@ fn collect(obstacles: &Query<(&Transform, &Obstacle)>) -> Vec<Aabb> {
         .collect()
 }
 
-/// Highest walkable surface under `p` that is no more than a step above `feet_y`.
-fn ground_height_at(boxes: &[Aabb], p: Vec2, feet_y: f32, t: &LocomotionTuning) -> f32 {
+/// Highest walkable surface under `p` (box data, used by the traversal probe) that is no more than a step above `feet_y`.
+fn box_ground_height_at(boxes: &[Aabb], p: Vec2, feet_y: f32, t: &LocomotionTuning) -> f32 {
     boxes
         .iter()
         .filter(|b| b.footprint_contains(p, 0.5 * t.radius) && b.max.y <= feet_y + t.step_height)
@@ -51,16 +53,105 @@ fn ground_height_at(boxes: &[Aabb], p: Vec2, feet_y: f32, t: &LocomotionTuning) 
         .fold(FLOOR_Y, f32::max)
 }
 
-/// Clearance from `feet_y` to the lowest overhead box above `p`.
-fn ceiling_at(boxes: &[Aabb], p: Vec2, feet_y: f32, t: &LocomotionTuning) -> f32 {
-    boxes
+/// Offsets of the probe rays under/over the capsule footprint.
+fn probe_offsets(radius: f32) -> [Vec3; 5] {
+    let r = radius * 0.7;
+    [Vec3::ZERO, Vec3::X * r, Vec3::NEG_X * r, Vec3::Z * r, Vec3::NEG_Z * r]
+}
+
+fn cast(ctx: &RapierContext, origin: Vec3, dir: Vec3, max: f32) -> Option<f32> {
+    // A ray that starts inside a collider reports distance 0; ignore it so
+    // probes buried in a wall don't read as ground or ceiling.
+    ctx.cast_ray(origin, dir, max, true, QueryFilter::default()).map(|(_, toi)| toi).filter(|&toi| toi > 1e-4)
+}
+
+/// Highest surface under the footprint that is no more than a step above `feet`.
+fn ground_height_at(ctx: &RapierContext, feet: Vec3, t: &LocomotionTuning) -> f32 {
+    let from = feet + Vec3::Y * t.step_height;
+    probe_offsets(t.radius)
         .iter()
-        .filter(|b| b.footprint_contains(p, t.radius) && b.min.y > feet_y + t.step_height)
-        .map(|b| b.min.y - feet_y)
+        .filter_map(|o| cast(ctx, from + *o, Vec3::NEG_Y, t.step_height + 200.0))
+        .map(|toi| from.y - toi)
+        .fold(FLOOR_Y, f32::max)
+}
+
+/// Clearance from `feet` up to the lowest overhead surface (above step height).
+fn ceiling_at(ctx: &RapierContext, feet: Vec3, t: &LocomotionTuning) -> f32 {
+    let from = feet + Vec3::Y * t.step_height;
+    probe_offsets(t.radius)
+        .iter()
+        .filter_map(|o| cast(ctx, from + *o, Vec3::Y, 20.0))
+        .map(|toi| t.step_height + toi)
         .fold(f32::INFINITY, f32::min)
 }
 
+/// Gives every character a Rapier kinematic controller; its shape follows the
+/// stance in `systems::integrate`.
+///
+/// Rapier only links an entity to its physics context when it has a collider,
+/// and characters use a controller-only shape, so the link is added by hand.
+pub fn init_controllers(
+    mut commands: Commands,
+    context: Query<Entity, With<DefaultRapierContext>>,
+    new: Query<Entity, Added<Locomotion>>,
+) {
+    let Ok(context) = context.single() else { return };
+    for entity in &new {
+        commands.entity(entity).insert((RapierContextEntityLink(context), KinematicCharacterController {
+            offset: CharacterLength::Absolute(0.01),
+            slide: true,
+            // Rapier's autostep doesn't trigger for a round capsule against a
+            // low ledge, so stepping is done from the sensed ground height
+            // (see `systems::integrate`) and the capsule starts above it.
+            autostep: None,
+            snap_to_ground: None,
+            // Shoving props: roughly a 75 kg person.
+            custom_mass: Some(75.0),
+            apply_impulse_to_dynamic_bodies: true,
+            ..default()
+        }));
+    }
+}
+
+/// Every `Obstacle` becomes a static cuboid in the Rapier world.
+pub fn add_obstacle_colliders(mut commands: Commands, new: Query<(Entity, &Obstacle), Added<Obstacle>>) {
+    for (entity, o) in &new {
+        let h = o.half_extents;
+        commands.entity(entity).insert(Collider::cuboid(h.x, h.y, h.z));
+    }
+}
+
+/// Last frame's controller result: drop velocity into whatever blocked us.
+pub fn absorb_blocked_motion(
+    bodies: Query<&RigidBody>,
+    mut characters: Query<(&Locomotion, &KinematicCharacterControllerOutput, &mut KinematicBody)>,
+) {
+    for (loco, out, mut body) in &mut characters {
+        if matches!(loco.state, LocomotionState::Traversal(_)) {
+            continue;
+        }
+        // Only static geometry stops us dead; shoved props give way.
+        let blocked_by_static = out.collisions.iter().any(|c| !matches!(bodies.get(c.entity), Ok(RigidBody::Dynamic)));
+        if !blocked_by_static {
+            continue;
+        }
+        let lost = out.desired_translation - out.effective_translation;
+        let lost_h = Vec3::new(lost.x, 0.0, lost.z);
+        if lost_h.length() > 1e-4 {
+            let n = lost_h.normalize();
+            let into = body.velocity.dot(n);
+            if into > 0.0 {
+                body.velocity -= n * into;
+            }
+        }
+        if out.desired_translation.y > 0.0 && lost.y > 1e-4 {
+            body.velocity.y = body.velocity.y.min(0.0);
+        }
+    }
+}
+
 pub fn sense_environment(
+    rapier: ReadRapierContext,
     obstacles: Query<(&Transform, &Obstacle)>,
     mut characters: Query<
         (
@@ -74,17 +165,18 @@ pub fn sense_environment(
         Without<Obstacle>,
     >,
 ) {
+    let Ok(ctx) = rapier.single() else { return };
     let boxes = collect(&obstacles);
     for (transform, body, intent, t, mut ground, mut env) in &mut characters {
         let pos = transform.translation;
-        ground.height = ground_height_at(&boxes, pos.xz(), pos.y, t);
+        ground.height = ground_height_at(&ctx, pos, t);
         ground.grounded = pos.y <= ground.height + GROUND_SKIN && body.velocity.y <= 0.0;
 
         let dir = intent.direction.xz().normalize_or_zero();
         let moving = intent.direction.length() >= t.move_deadzone;
-        env.ceiling_height = ceiling_at(&boxes, pos.xz(), pos.y, t);
+        env.ceiling_height = ceiling_at(&ctx, pos, t);
         env.ceiling_ahead = if moving {
-            ceiling_at(&boxes, pos.xz() + dir * t.tunnel_probe_distance, pos.y, t)
+            ceiling_at(&ctx, pos + Vec3::new(dir.x, 0.0, dir.y) * t.tunnel_probe_distance, t)
         } else {
             f32::INFINITY
         };
@@ -119,7 +211,7 @@ fn probe_traversal(boxes: &[Aabb], pos: Vec3, dir: Vec2, t: &LocomotionTuning) -
                 depth: exit - enter - 2.0 * r,
                 edge: at(enter + r, top),
                 onto: at((enter + 2.0 * r + ONTO_MARGIN).min(exit - r), top),
-                over: at(exit + LANDING_MARGIN, ground_height_at(boxes, over_xz, pos.y, t)),
+                over: at(exit + LANDING_MARGIN, box_ground_height_at(boxes, over_xz, pos.y, t)),
             };
             Some((enter, candidate))
         })
@@ -137,50 +229,99 @@ fn ray_aabb_2d(origin: Vec2, dir: Vec2, min: Vec2, max: Vec2) -> Option<(f32, f3
     (exit >= enter.max(0.0)).then_some((enter.max(0.0), exit))
 }
 
-/// Pushes characters out of boxes they overlap vertically, steps them up low
-/// ledges and keeps them on the ground. Skipped mid-traversal (kinematic).
-pub fn resolve_collisions(
-    obstacles: Query<(&Transform, &Obstacle)>,
-    mut characters: Query<
-        (&Locomotion, &LocomotionTuning, &mut Transform, &mut KinematicBody),
-        Without<Obstacle>,
-    >,
-) {
-    let boxes = collect(&obstacles);
-    for (loco, t, mut transform, mut body) in &mut characters {
-        if matches!(loco.state, LocomotionState::Traversal(_)) {
-            continue;
-        }
-        let height = t.height(loco.state.stance());
-        let mut pos = transform.translation;
-        for b in &boxes {
-            let walkable = b.max.y - pos.y <= t.step_height;
-            let overhead = b.min.y >= pos.y + height;
-            if walkable || overhead {
-                continue;
-            }
-            let center = Vec2::new(b.min.x + b.max.x, b.min.z + b.max.z) * 0.5;
-            let half = Vec2::new(b.max.x - b.min.x, b.max.z - b.min.z) * 0.5 + Vec2::splat(t.radius);
-            let delta = pos.xz() - center;
-            let penetration = half - delta.abs();
-            if penetration.min_element() <= 0.0 {
-                continue;
-            }
-            // Push out along the axis of least penetration and kill velocity into the wall.
-            if penetration.x < penetration.y {
-                pos.x += penetration.x * delta.x.signum();
-                body.velocity.x = 0.0;
-            } else {
-                pos.z += penetration.y * delta.y.signum();
-                body.velocity.z = 0.0;
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
 
-        let ground = ground_height_at(&boxes, pos.xz(), pos.y, t);
-        if pos.y < ground {
-            pos.y = ground;
-            body.velocity.y = body.velocity.y.max(0.0);
+    use bevy::time::TimeUpdateStrategy;
+
+    use super::*;
+    use crate::locomotion::LocomotionPlugin;
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            TransformPlugin,
+            AssetPlugin::default(),
+            bevy::mesh::MeshPlugin,
+            LocomotionPlugin,
+        ))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(16)));
+        app.world_mut().spawn((Collider::cuboid(100.0, 0.5, 100.0), Transform::from_xyz(0.0, -0.5, 0.0)));
+        app
+    }
+
+    fn run(app: &mut App, frames: usize) {
+        for _ in 0..frames {
+            app.update();
         }
-        transform.translation = pos;
+    }
+
+    #[test]
+    fn character_is_stopped_by_a_wall_and_stays_on_the_floor() {
+        let mut app = app();
+        let half = Vec3::new(5.0, 3.0, 0.15);
+        app.world_mut().spawn((Obstacle { half_extents: half }, Transform::from_xyz(0.0, 3.0, -3.0)));
+        let player = app
+            .world_mut()
+            .spawn((Locomotion::default(), MoveIntent { direction: Vec3::NEG_Z, ..default() }))
+            .id();
+        run(&mut app, 400);
+
+        let pos = app.world().get::<Transform>(player).unwrap().translation;
+        assert!(pos.z > -3.0 + 0.15 + 0.2, "went through the wall: {pos}");
+        assert!(pos.z < -2.0, "never reached the wall: {pos}");
+        assert!(pos.y.abs() < 0.1, "left the floor: {pos}");
+        assert!(app.world().get::<GroundSensor>(player).unwrap().grounded);
+    }
+
+    #[test]
+    fn character_steps_onto_a_low_curb() {
+        let mut app = app();
+        app.world_mut().spawn((Obstacle { half_extents: Vec3::new(5.0, 0.1, 20.0) }, Transform::from_xyz(0.0, 0.1, -21.0)));
+        let player = app
+            .world_mut()
+            .spawn((Locomotion::default(), MoveIntent { direction: Vec3::NEG_Z, ..default() }))
+            .id();
+        run(&mut app, 400);
+        let pos = app.world().get::<Transform>(player).unwrap().translation;
+        assert!((pos.y - 0.2).abs() < 0.08, "not standing on the curb: {pos}");
+    }
+
+    #[test]
+    fn character_pushes_a_dynamic_crate() {
+        let mut app = app();
+        let crate_ = app
+            .world_mut()
+            .spawn((RigidBody::Dynamic, Collider::cuboid(0.4, 0.4, 0.4), ColliderMassProperties::Mass(30.0), Transform::from_xyz(0.0, 0.41, -1.5)))
+            .id();
+        app.world_mut().spawn((Locomotion::default(), MoveIntent { direction: Vec3::NEG_Z, ..default() }));
+        run(&mut app, 300);
+        let z = app.world().get::<Transform>(crate_).unwrap().translation.z;
+        assert!(z < -3.0, "crate was not pushed: z = {z}");
+    }
+
+    #[test]
+    fn running_into_prone_dives_and_keeps_momentum() {
+        let mut app = app();
+        let player = app
+            .world_mut()
+            .spawn((Locomotion::default(), MoveIntent { direction: Vec3::NEG_Z, ..default() }))
+            .id();
+        run(&mut app, 120);
+        let before = app.world().get::<Transform>(player).unwrap().translation.z;
+        app.world_mut().get_mut::<MoveIntent>(player).unwrap().prone = true;
+        run(&mut app, 1);
+        {
+            let mut intent = app.world_mut().get_mut::<MoveIntent>(player).unwrap();
+            intent.prone = false;
+            intent.direction = Vec3::ZERO;
+        }
+        run(&mut app, 45); // ~0.7 s
+        let w = app.world();
+        assert!(matches!(w.get::<Locomotion>(player).unwrap().state, LocomotionState::Dive | LocomotionState::Grounded { .. }));
+        let slid = before - w.get::<Transform>(player).unwrap().translation.z;
+        assert!(slid > 1.8, "stopped dead instead of diving: slid {slid} m");
     }
 }

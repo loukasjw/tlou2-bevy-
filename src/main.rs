@@ -1,10 +1,12 @@
 mod camera;
 mod locomotion;
+mod rig;
 mod weapon;
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy_rapier3d::prelude::{Collider, ColliderMassProperties, Friction, Restitution, RigidBody};
 
 use camera::{CameraRigPlugin, OrbitCamera};
 
@@ -14,6 +16,7 @@ use locomotion::sprint::SprintStamina;
 use locomotion::state::{Locomotion, LocomotionState};
 use locomotion::tuning::LocomotionTuning;
 use locomotion::{LocomotionPlugin, LocomotionSet};
+use rig::RigPlugin;
 use weapon::damage::{Target, TargetKind};
 use weapon::melee::{MeleeState, MeleeTuning, SwingPhase};
 use weapon::systems::{HitFlash, ShotEffects};
@@ -78,7 +81,7 @@ struct InputLatch {
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, LocomotionPlugin, CameraRigPlugin, WeaponPlugin))
+        .add_plugins((DefaultPlugins, LocomotionPlugin, CameraRigPlugin, WeaponPlugin, RigPlugin))
         .init_resource::<ControlSettings>()
         .add_systems(Startup, setup)
         .add_systems(Update, (grab_cursor, read_player_input).chain().in_set(LocomotionSet::Input))
@@ -98,6 +101,8 @@ fn setup(
         Mesh3d(meshes.add(Plane3d::default().mesh().size(500.0, 500.0))),
         MeshMaterial3d(materials.add(Color::srgb(0.35, 0.4, 0.35))),
     ));
+    // The visual plane is at y = 0; the collider's top face matches it.
+    commands.spawn((Collider::cuboid(250.0, 0.5, 250.0), Transform::from_xyz(0.0, -0.5, 0.0)));
 
     // (min corner, max corner) of each box.
     let course = [
@@ -126,6 +131,50 @@ fn setup(
             MeshMaterial3d(wall_material.clone()),
             Transform::from_translation((min + max) * 0.5),
             Obstacle { half_extents: size * 0.5 },
+        ));
+    }
+
+    // Level dressing: static, original shapes. Each is an `Obstacle`, so it
+    // gets a Rapier collider and blocks shots and the camera.
+    let container_material = materials.add(Color::srgb(0.7, 0.28, 0.2));
+    let concrete_material = materials.add(Color::srgb(0.6, 0.6, 0.58));
+    // (centre, half extents, material): shipping containers, a stack and jersey barriers.
+    let dressing = [
+        (Vec3::new(14.0, 1.3, 4.0), Vec3::new(3.0, 1.3, 1.2), &container_material),
+        (Vec3::new(14.0, 3.9, 4.0), Vec3::new(3.0, 1.3, 1.2), &container_material),
+        (Vec3::new(14.0, 1.3, -1.0), Vec3::new(3.0, 1.3, 1.2), &container_material),
+        (Vec3::new(-8.0, 0.4, 6.0), Vec3::new(1.5, 0.4, 0.3), &concrete_material),
+        (Vec3::new(-11.0, 0.4, 6.0), Vec3::new(1.5, 0.4, 0.3), &concrete_material),
+        (Vec3::new(-9.5, 0.4, 9.0), Vec3::new(0.3, 0.4, 1.5), &concrete_material),
+    ];
+    for (center, half, material) in dressing {
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::from_size(half * 2.0))),
+            MeshMaterial3d(material.clone()),
+            Transform::from_translation(center),
+            Obstacle { half_extents: half },
+        ));
+    }
+
+    // Pushable props near the start: crates and barrels the player shoves
+    // around (the character controller applies impulses to dynamic bodies).
+    let crate_material = materials.add(Color::srgb(0.6, 0.45, 0.25));
+    let barrel_material = materials.add(Color::srgb(0.25, 0.35, 0.5));
+    for (i, (x, z)) in [(2.5, 2.0), (2.5, 3.0), (3.6, 2.5), (-3.0, 3.0), (-4.2, 4.0)].into_iter().enumerate() {
+        let (shape, collider, half_y, mass) = if i % 2 == 0 {
+            (Mesh::from(Cuboid::from_length(0.8)), Collider::cuboid(0.4, 0.4, 0.4), 0.4, 30.0)
+        } else {
+            (Mesh::from(Cylinder::new(0.3, 0.9)), Collider::cylinder(0.45, 0.3), 0.45, 20.0)
+        };
+        commands.spawn((
+            RigidBody::Dynamic,
+            collider,
+            ColliderMassProperties::Mass(mass),
+            Friction::coefficient(0.8),
+            Restitution::coefficient(0.05),
+            Mesh3d(meshes.add(shape)),
+            MeshMaterial3d(if i % 2 == 0 { crate_material.clone() } else { barrel_material.clone() }),
+            Transform::from_xyz(x, half_y + 0.01, z),
         ));
     }
 
@@ -161,61 +210,44 @@ fn setup(
     }
 
     let tuning = LocomotionTuning::default();
-    let gray = materials.add(Color::srgb(0.55, 0.57, 0.62));
-    let red = materials.add(Color::srgb(0.65, 0.15, 0.15));
-    // Mannequin built only from capsules, sized for a 1.8 m stand. PlayerBody
-    // sits at mid-height so parts are placed relative to the centre (feet at
-    // -0.9). Each entry is (radius, total pill height, material, offset).
-    let pills = [
-        // Legs: thigh and shin on each side
-        (0.07, 0.40, &gray, Vec3::new(-0.10, -0.30, 0.0)),
-        (0.07, 0.40, &gray, Vec3::new(0.10, -0.30, 0.0)),
-        (0.055, 0.40, &gray, Vec3::new(-0.10, -0.69, 0.0)),
-        (0.055, 0.40, &gray, Vec3::new(0.10, -0.69, 0.0)),
-        // Torso: narrow waist under a bigger chest
-        (0.12, 0.30, &red, Vec3::new(0.0, 0.02, 0.0)),
-        (0.16, 0.50, &red, Vec3::new(0.0, 0.27, 0.0)),
-        // Arms: upper and lower on each side
-        (0.045, 0.32, &gray, Vec3::new(-0.24, 0.40, 0.0)),
-        (0.045, 0.32, &gray, Vec3::new(0.24, 0.40, 0.0)),
-        (0.04, 0.32, &gray, Vec3::new(-0.24, 0.10, 0.0)),
-        (0.04, 0.32, &gray, Vec3::new(0.24, 0.10, 0.0)),
-        // Neck and head
-        (0.04, 0.12, &gray, Vec3::new(0.0, 0.60, 0.0)),
-        (0.09, 0.20, &gray, Vec3::new(0.0, 0.75, 0.0)),
-    ];
+    // Jointed placeholder humanoid (see rig.rs). The rig root carries PlayerBody.
     let player = commands
         .spawn((Player, Locomotion::default(), Loadout::default(), tuning.clone(), Visibility::default()))
-        .with_children(|player| {
-            player
-                .spawn((
-                    PlayerBody,
-                    Transform::from_xyz(0.0, tuning.standing_height * 0.5, 0.0),
-                    Visibility::default(),
-                ))
-                .with_children(|body| {
-                    for (radius, height, material, offset) in pills {
-                        body.spawn((
-                            Mesh3d(meshes.add(Capsule3d::new(radius, height - 2.0 * radius))),
-                            MeshMaterial3d(material.clone()),
-                            Transform::from_translation(offset),
-                        ));
-                    }
-                });
-        })
         .id();
+    rig::spawn_rig(&mut commands, &mut meshes, &mut materials, player, PlayerBody);
 
-    let stick_material = materials.add(Color::srgb(0.35, 0.22, 0.12));
+    let wood = materials.add(Color::srgb(0.35, 0.22, 0.12));
+    let steel = materials.add(Color::srgb(0.15, 0.15, 0.17));
+    let rust = materials.add(Color::srgb(0.45, 0.3, 0.22));
     for weapon in [WeaponId::HuntingRifle, WeaponId::Pistol, WeaponId::Melee] {
-        let (length, thickness) = stick_size(weapon).expect("has a stick");
-        commands.spawn((
-            HeldStick(weapon),
-            Mesh3d(meshes.add(Cuboid::new(thickness, thickness, length))),
-            MeshMaterial3d(stick_material.clone()),
-            Transform::default(),
-            Visibility::Hidden,
-            ChildOf(player),
-        ));
+        // (size, offset from the weapon centre, material). -Z is the muzzle end.
+        let parts: Vec<(Vec3, Vec3, &Handle<StandardMaterial>)> = match weapon {
+            WeaponId::HuntingRifle => vec![
+                (Vec3::new(0.03, 0.03, 0.55), Vec3::new(0.0, 0.0, -0.28), &steel),
+                (Vec3::new(0.05, 0.08, 0.30), Vec3::new(0.0, 0.0, 0.02), &steel),
+                (Vec3::new(0.05, 0.11, 0.30), Vec3::new(0.0, -0.03, 0.40), &wood),
+                (Vec3::new(0.04, 0.04, 0.22), Vec3::new(0.0, 0.07, -0.02), &steel),
+            ],
+            WeaponId::Pistol => vec![
+                (Vec3::new(0.035, 0.04, 0.20), Vec3::new(0.0, 0.0, -0.07), &steel),
+                (Vec3::new(0.035, 0.10, 0.045), Vec3::new(0.0, -0.07, 0.08), &wood),
+            ],
+            _ => vec![
+                (Vec3::new(0.04, 0.04, 0.20), Vec3::new(0.0, 0.0, 0.03), &wood),
+                (Vec3::new(0.09, 0.06, 0.10), Vec3::new(0.0, 0.0, -0.10), &rust),
+            ],
+        };
+        commands
+            .spawn((HeldStick(weapon), Transform::default(), Visibility::Hidden, ChildOf(player)))
+            .with_children(|stick| {
+                for (size, offset, material) in parts {
+                    stick.spawn((
+                        Mesh3d(meshes.add(Cuboid::from_size(size))),
+                        MeshMaterial3d(material.clone()),
+                        Transform::from_translation(offset),
+                    ));
+                }
+            });
     }
 
     commands.spawn(OrbitCamera::new(player));
@@ -434,22 +466,14 @@ fn read_player_input(
     *intent = MoveIntent { direction, sprint, jump, crouch, prone, strafe_facing, evade };
 }
 
-/// Squash the capsule toward the current stance height (stand-in for animation).
+/// Hides the body while looking through the scope (the camera sits inside the head).
+/// Crouch and prone are posed by the rig, not by squashing it.
 fn update_body_visual(
-    time: Res<Time>,
-    player: Query<(&Locomotion, &LocomotionTuning, &Loadout), With<Player>>,
-    mut body: Query<(&mut Transform, &mut Visibility), With<PlayerBody>>,
+    player: Query<&Loadout, With<Player>>,
+    mut body: Query<&mut Visibility, With<PlayerBody>>,
 ) {
-    let (Ok((loco, tuning, loadout)), Ok((mut transform, mut visibility))) = (player.single(), body.single_mut())
-    else {
-        return;
-    };
-    // The scope camera sits inside the head.
+    let (Ok(loadout), Ok(mut visibility)) = (player.single(), body.single_mut()) else { return };
     *visibility = if scoped(loadout) { Visibility::Hidden } else { Visibility::Inherited };
-    let target = tuning.height(loco.state.stance()) / tuning.standing_height;
-    let t = 1.0 - (-12.0 * time.delta_secs()).exp();
-    transform.scale.y += (target - transform.scale.y) * t;
-    transform.translation.y = tuning.standing_height * 0.5 * transform.scale.y;
 }
 
 /// Shows the equipped weapon's stick in the right hand: lowered while

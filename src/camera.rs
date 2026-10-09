@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 
 use crate::locomotion::LocomotionSet;
-use crate::locomotion::sensors::Obstacle;
+use bevy_rapier3d::prelude::*;
 use crate::locomotion::state::{Locomotion, Stance};
 use crate::weapon::{Loadout, WeaponId};
 
@@ -162,7 +162,7 @@ pub fn update_orbit_camera(
     table: Res<CameraZoomOffsets>,
     tuning: Res<CameraTuning>,
     targets: Query<(&Transform, &Locomotion, Option<&Loadout>), Without<OrbitCamera>>,
-    obstacles: Query<(&Transform, &Obstacle), Without<OrbitCamera>>,
+    rapier: ReadRapierContext,
     mut cameras: Query<(&mut OrbitCamera, &mut Transform, &mut Projection)>,
 ) {
     let dt = time.delta_secs();
@@ -192,10 +192,15 @@ pub fn update_orbit_camera(
         let to_camera = wanted - pivot;
         let length = to_camera.length();
         let dir = to_camera / length.max(1e-4);
-        let hit = obstacles
-            .iter()
-            .filter_map(|(t, o)| ray_box(pivot, dir, t.translation - o.half_extents, t.translation + o.half_extents))
-            .fold(length, f32::min);
+        let hit = rapier
+            .single()
+            .ok()
+            .and_then(|ctx| ctx.cast_ray(pivot, dir, length, true, QueryFilter::default()))
+            .map(|(_, toi)| toi)
+            // Rays that start inside a collider are ignored, so a low roof over
+            // the player doesn't collapse the camera onto the pivot.
+            .filter(|&d| d > 1e-3)
+            .unwrap_or(length);
         let distance = if hit < length { (hit - tuning.wall_margin).max(0.0) } else { length };
 
         transform.translation = pivot + dir * distance;
